@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Node / Frontend
+frontend/node_modules/
+frontend/dist/
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# OS
+Thumbs.db
+.DS_Store
+Desktop.ini
+
+# Env
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+_backend*.log
+
+# Temp
+*.tmp
+temp_*.py
+check_*.cjs
