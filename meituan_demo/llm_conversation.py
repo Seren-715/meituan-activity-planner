@@ -18,15 +18,17 @@ SYSTEM_PROMPT = """你是「美团本地活动规划助手」，通过自然对�
 
 1. **正常收集**：用户说出需求后先理解认可，再自然追问 1 个缺失的关键信息。
 2. **寒暄处理**：寒暄→友好回应引回正题；模糊/矛盾→温和指出。
-3. **改口检测**：如果用户推翻了之前说过的话（比如先说要"下午"后来说"算了晚上吧"），要明确确认改口内容（"好的，时间窗口从下午改成晚上了"），然后继续追问。
-4. **冲突提示**：如果新信息与已有约束产生矛盾（比如晚上+6小时太长、带孩子+紧凑节奏太累），要温和指出并征求确认。
-5. **主动复述**：当所有核心信息收集完毕时（scene, group_size, city, time_window, duration_hours 都有值），主动复述一遍完整需求让用户确认，格式："我帮你确认一下：...对吗？"
-6. **距离理解**：不要主动问"想去近一点还是远一点的地方"，因为没有具体出发点时这个问题没有意义。默认 distance_preference 为"常规"即可。只有当用户主动提到具体出发点（如"公司附近"、"西湖旁边"、"从东街口出发"）时，才根据上下文设置 distance_preference（就近→"近场"，愿意跑远→"可稍远"）。
-7. **出发点收集**：如果用户说了城市但没有具体出发点，不需要追问出发点，直接用城市作为规划依据即可。如果用户主动提到"附近"、"旁边"等相对位置词，可以自然追问一句具体在哪里。
+3. **改口检测**：如果用户推翻了之前说过的话，要明确确认改口内容，然后继续追问。
+4. **冲突提示**：如果新信息与已有约束产生矛盾，要温和指出并征求确认。
+5. **主动复述**：当核心信息收集完毕时（scene, group_size, city, time_window, duration_hours 都有值），主动复述一遍完整需求让用户确认。
+6. **距离理解**：**不要问"想去近一点还是远一点"**。distance_preference 默认"常规"，只有用户主动提到具体出发点时才设置。
+7. **出发点收集**：不要主动追问出发点。如果用户主动说了具体位置（如"从公司附近"、"在西湖旁边"），记录即可。
+8. **人数推断**：用户说"自己出去"、"一个人"、"自己逛逛"时，group_size 直接设为 1，不需要再问。
+9. **信息充足即规划**：当 scene, group_size, city, time_window, duration_hours 都有值后，**立即**设置 ready_to_plan=true 并给出 goal 字段，不要再追问其他问题。
 
 ## ready_to_plan 条件
-scene && group_size && city && time_window && duration_hours 都非空时设为 true，同时必须给出 goal 字段。
-distance_preference 不是必填项，有具体出发点时才需要，否则默认"常规"。"""
+scene && group_size && city && time_window && duration_hours 都非空时**必须**设为 true。
+一旦 ready_to_plan=true，你的 assistant_reply 应该是确认信息+告知用户正在规划，不要继续追问。"""
 
 CONVERSATION_TOOL = {
     "type": "function",
@@ -172,63 +174,77 @@ class LLMConversationEngine:
             if item.get("role") == "user":
                 content = str(item.get("content", "")).strip()
                 if content:
-                    # 尝试从历史消息提取城市等上下文
                     break
 
         goal = self._goal_parser.parse(latest_user, context)
-        has_enough = bool(goal.scene and goal.group_size and goal.city and goal.time_window)
+
+        # 从对话历史中补充缺失的槽位
+        slots = {
+            "goal": goal.raw_text,
+            "scene": goal.scene or "",
+            "group_size": str(goal.group_size) if goal.group_size else "",
+            "city": goal.city or "",
+            "time_window": goal.time_window or "",
+            "duration_hours": str(goal.duration_hours) if goal.duration_hours else "",
+            "distance_preference": goal.distance_preference or "",
+            "travel_mode": goal.travel_mode or "",
+            "child_age_hint": goal.child_age_hint or "",
+            "dining_preference": ",".join(goal.dining_preferences) if goal.dining_preferences else "",
+            "pace_preference": goal.pace_preference or "",
+            "special_needs": ",".join(goal.special_needs) if goal.special_needs else "",
+        }
+        self._backfill_slots_from_history(slots, messages)
+
+        has_enough = bool(slots.get("scene") and slots.get("group_size") and slots.get("city") and slots.get("time_window"))
 
         if has_enough:
-            distance_text = f"，{goal.distance_preference}距离" if goal.distance_preference != "常规" else ""
+            distance_text = f"，{slots.get('distance_preference', '常规')}距离" if slots.get("distance_preference", "常规") != "常规" else ""
             reply_text = (
-                f"好的，我理解了你的需求：{goal.scene}场景，{goal.group_size}人，"
-                f"{goal.time_window}{goal.duration_hours}小时{distance_text}。"
+                f"好的，我理解了你的需求：{slots['scene']}场景，{slots['group_size']}人，"
+                f"{slots['time_window']}{slots.get('duration_hours', '4')}小时{distance_text}。"
                 f"信息已经足够，我来帮你生成方案。"
             )
             goal_dict = {
-                "raw_text": goal.raw_text,
-                "scene": goal.scene,
-                "group_size": goal.group_size,
-                "duration_hours": goal.duration_hours,
-                "time_window": goal.time_window,
-                "distance_preference": goal.distance_preference,
-                "city": goal.city,
+                "raw_text": goal.raw_text or latest_user,
+                "scene": slots["scene"],
+                "group_size": int(slots["group_size"]),
+                "duration_hours": int(slots.get("duration_hours") or "4"),
+                "time_window": slots["time_window"],
+                "distance_preference": slots.get("distance_preference", "常规"),
+                "city": slots["city"],
                 "origin_name": goal.origin_name,
                 "origin_lat": goal.origin_lat,
                 "origin_lng": goal.origin_lng,
-                "travel_mode": goal.travel_mode,
-                "child_age_hint": goal.child_age_hint,
+                "travel_mode": slots.get("travel_mode", "driving"),
+                "child_age_hint": slots.get("child_age_hint", ""),
                 "share_target": goal.share_target,
-                "pace_preference": goal.pace_preference,
+                "pace_preference": slots.get("pace_preference", "常规"),
                 "preferences": goal.preferences,
-                "dining_preferences": goal.dining_preferences,
-                "special_needs": goal.special_needs,
+                "dining_preferences": slots.get("dining_preference", "").split(",") if slots.get("dining_preference") else [],
+                "special_needs": slots.get("special_needs", "").split(",") if slots.get("special_needs") else [],
                 "constraints": [{"key": c.key, "value": c.value} for c in goal.constraints],
             }
-            slots = {k: str(v) for k, v in goal_dict.items() if k in self._goal_required_fields or k in ("travel_mode", "child_age_hint", "dining_preference", "pace_preference", "special_needs")}
-            slots["goal"] = goal.raw_text
-            slots["dining_preference"] = ",".join(goal.dining_preferences) if goal.dining_preferences else ""
-            slots["special_needs"] = ",".join(goal.special_needs) if goal.special_needs else ""
+            # 直接使用 backfill 后的 slots，不再从 goal_dict 重建
+            slots["goal"] = goal.raw_text or latest_user
             return {
                 "assistant_reply": reply_text,
                 "slots": slots,
                 "ready_to_plan": True,
                 "suggested_replies": ["开始规划", "再改一点"],
-                "plan_text": goal.raw_text,
+                "plan_text": goal.raw_text or latest_user,
                 "goal": goal_dict,
             }
 
         # 信息不足时，生成追问
         missing = []
-        if not goal.scene:
+        if not slots.get("scene"):
             missing.append("是家庭出行还是朋友聚会")
-        if not goal.group_size or goal.group_size <= 1:
+        if not slots.get("group_size"):
             missing.append("大概几个人")
-        if not goal.city:
+        if not slots.get("city"):
             missing.append("在哪个城市")
-        if not goal.time_window or goal.time_window == "下午":
-            if "上午" not in latest_user and "晚上" not in latest_user and "中午" not in latest_user:
-                missing.append("想上午、下午还是晚上出发")
+        if not slots.get("time_window"):
+            missing.append("想上午、下午还是晚上出发")
 
         if missing:
             question = "我还想再确认几个信息：" + "、".join(missing) + "？"
@@ -237,17 +253,9 @@ class LLMConversationEngine:
 
         return {
             "assistant_reply": question,
-            "slots": {
-                "goal": "", "scene": goal.scene or "", "group_size": str(goal.group_size or ""),
-                "city": goal.city or "", "time_window": goal.time_window or "",
-                "duration_hours": str(goal.duration_hours or ""), "distance_preference": goal.distance_preference or "",
-                "travel_mode": goal.travel_mode or "", "child_age_hint": goal.child_age_hint or "",
-                "dining_preference": ",".join(goal.dining_preferences) if goal.dining_preferences else "",
-                "pace_preference": goal.pace_preference or "",
-                "special_needs": ",".join(goal.special_needs) if goal.special_needs else "",
-            },
+            "slots": slots,
             "ready_to_plan": False,
-            "suggested_replies": ["家庭出行", "朋友聚会", "一个人随便逛逛"],
+            "suggested_replies": self._generate_suggested_replies(slots),
             "plan_text": "",
             "goal": None,
         }
@@ -383,6 +391,16 @@ class LLMConversationEngine:
                        "suggested_replies": normalized["suggested_replies"],
                        "plan_text": normalized["plan_text"],
                        "goal": normalized.get("goal")}
+            elif text_buffer:
+                # LLM 返回了文本但没有 tool_calls —— 用 fallback 补充结构化数据
+                logger.warning("LLM 返回了文本但无 tool_calls，使用 fallback 补充 slots。")
+                fallback = self._fallback_parse(messages)
+                yield {"type": "done",
+                       "slots": fallback["slots"],
+                       "ready_to_plan": fallback["ready_to_plan"],
+                       "suggested_replies": fallback["suggested_replies"],
+                       "plan_text": fallback["plan_text"],
+                       "goal": fallback.get("goal")}
             else:
                 raise self._service_error("模型未返回可解析的 tool_calls。")
 
@@ -391,8 +409,6 @@ class LLMConversationEngine:
             self._llm_disabled = True
             self._client = None
             fallback = self._fallback_parse(messages)
-            # 如果已经 yield 过 token，先清空前端已收到的内容
-            yield {"type": "token", "text": "\n\n> ⚠️ 对话服务暂时中断，已切换到基础模式继续。\n\n"}
             yield {"type": "token", "text": fallback["assistant_reply"]}
             yield {"type": "done",
                    "slots": fallback["slots"],
@@ -458,15 +474,38 @@ class LLMConversationEngine:
         if ready_to_plan and goal is None:
             ready_to_plan = False
 
+        suggested = [str(r) for r in (parsed.get("suggested_replies") or []) if isinstance(r, str)][:3]
+
         result = {
             "assistant_reply": str(parsed.get("assistant_reply", "") or ""),
             "slots": slots,
             "ready_to_plan": ready_to_plan,
-            "suggested_replies": [str(r) for r in (parsed.get("suggested_replies") or []) if isinstance(r, str)][:3],
+            "suggested_replies": suggested,
             "plan_text": str(parsed.get("plan_text", "") or ""),
             "goal": goal,
         }
-        return self._enforce_location_requirement(result)
+        result = self._enforce_location_requirement(result)
+
+        # 当未就绪时，始终用槽位状态生成追问选项（忽略 LLM 给的推荐内容）
+        if not result.get("ready_to_plan"):
+            result["suggested_replies"] = self._generate_suggested_replies(result.get("slots", {}))
+
+        return result
+
+    def _generate_suggested_replies(self, slots: dict[str, Any]) -> list[str]:
+        """根据当前槽位状态自动生成追问快捷回复。"""
+        if not slots.get("scene"):
+            return ["家庭出行", "朋友聚会", "一个人逛逛"]
+        if not slots.get("group_size"):
+            return ["就我自己", "2-3个人", "4个人以上"]
+        if not slots.get("city"):
+            return ["我在福州", "杭州", "北京"]
+        if not slots.get("time_window"):
+            return ["上午", "下午", "晚上"]
+        if not slots.get("duration_hours"):
+            return ["1-2个小时", "半天", "一整天"]
+        # 所有核心槽位都有了，提示确认
+        return ["可以，就这样", "再改一点"]
 
     def _normalize_goal(self, goal_raw: Any) -> dict[str, Any] | None:
         """只接受字段完整的 Goal，避免把坏结构传给规划器。"""
@@ -481,7 +520,10 @@ class LLMConversationEngine:
 
         try:
             normalized["group_size"] = int(normalized["group_size"])
-            normalized["duration_hours"] = int(normalized["duration_hours"])
+            duration_hours = self._coerce_duration_hours(normalized["duration_hours"])
+            if duration_hours is None:
+                return None
+            normalized["duration_hours"] = duration_hours
         except (TypeError, ValueError):
             return None
 
@@ -519,13 +561,34 @@ class LLMConversationEngine:
             return result
 
         slots = dict(result.get("slots") or {})
-        if not self._has_confirmation_ready_slots(slots):
-            return result
 
-        # 确认语通常意味着用户接受当前理解，这里对缺失的非关键槽位补默认值。
-        slots.setdefault("goal", "")
+        # 从历史消息中补充缺失的槽位
+        self._backfill_slots_from_history(slots, messages)
+
+        # 确认语意味着用户接受当前理解，对缺失字段补默认值。
+        slots.setdefault("goal", latest_user)
+        if not slots.get("goal"):
+            slots["goal"] = latest_user
+        if not slots.get("scene"):
+            slots["scene"] = "generic"
+        if not slots.get("group_size"):
+            # 从历史消息推断人数
+            all_text = " ".join(str(m.get("content", "")) for m in (messages or []) if m.get("role") == "user")
+            if any(w in all_text for w in ["自己", "一个人", "自己逛"]):
+                slots["group_size"] = "1"
+            else:
+                slots["group_size"] = "2"
+        if not slots.get("city"):
+            # 没有城市信息，不能进入规划
+            return result
+        if not slots.get("time_window"):
+            slots["time_window"] = "下午"
         if not slots.get("duration_hours"):
             slots["duration_hours"] = "4"
+        else:
+            normalized_duration = self._coerce_duration_hours(slots.get("duration_hours"))
+            if normalized_duration is not None:
+                slots["duration_hours"] = str(normalized_duration)
         if not slots.get("distance_preference"):
             slots["distance_preference"] = "常规"
         if not slots.get("travel_mode"):
@@ -546,6 +609,65 @@ class LLMConversationEngine:
             result["suggested_replies"] = ["开始规划", "再改一点"]
         return self._enforce_location_requirement(result)
 
+    def _backfill_slots_from_history(self, slots: dict[str, Any], messages: list[dict[str, Any]] | None) -> None:
+        """从对话历史中提取并补充缺失的槽位值。"""
+        all_user_text = " ".join(
+            str(m.get("content", "")).strip()
+            for m in (messages or [])
+            if m.get("role") == "user"
+        )
+
+        if not slots.get("scene"):
+            if any(w in all_user_text for w in ["老婆", "老公", "孩子", "宝宝", "带娃", "亲子", "家庭", "家人"]):
+                slots["scene"] = "family"
+            elif any(w in all_user_text for w in ["朋友", "同学", "同事", "闺蜜", "兄弟", "聚会"]):
+                slots["scene"] = "friends"
+            elif any(w in all_user_text for w in ["自己", "一个人", "自己逛"]):
+                slots["scene"] = "generic"
+
+        # 人数检测：明确表达（"自己"/"一个人"）优先级高于默认值
+        if any(w in all_user_text for w in ["自己", "一个人", "自己逛", "独自"]):
+            slots["group_size"] = "1"
+        elif "两大一小" in all_user_text:
+            slots["group_size"] = "3"
+        elif not slots.get("group_size"):
+            import re
+            m = re.search(r"([0-9一二两三四五六七八九十]+)\s*个?人", all_user_text)
+            if m:
+                mapping = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5}
+                token = m.group(1)
+                slots["group_size"] = str(int(token) if token.isdigit() else mapping.get(token, 2))
+
+        if not slots.get("city"):
+            for m in (messages or []):
+                if m.get("role") == "user":
+                    content = str(m.get("content", ""))
+                    # 匹配"在XX"或纯城市名
+                    import re
+                    city_match = re.search(r"在([一-龥]{2,4})", content)
+                    if city_match:
+                        candidate = city_match.group(1)
+                        if candidate not in ("福州大学", "附近", "这边", "公司"):
+                            slots["city"] = candidate
+                            break
+
+        if not slots.get("time_window"):
+            if "上午" in all_user_text or "早上" in all_user_text:
+                slots["time_window"] = "上午"
+            elif "中午" in all_user_text:
+                slots["time_window"] = "中午"
+            elif "晚上" in all_user_text:
+                slots["time_window"] = "晚上"
+            else:
+                slots["time_window"] = "下午"
+
+        if not slots.get("duration_hours"):
+            duration_hours = self._coerce_duration_hours(all_user_text)
+            if duration_hours is not None:
+                slots["duration_hours"] = str(duration_hours)
+            elif "半天" in all_user_text:
+                slots["duration_hours"] = "4"
+
     def _is_positive_confirmation(self, text: str) -> bool:
         compact = _re.sub(r"\s+", "", str(text or "")).lower()
         if not compact:
@@ -553,6 +675,7 @@ class LLMConversationEngine:
         patterns = [
             r"(就按这个来|按这个来|就这么定|就这样吧|开始吧|可以开始了|没问题就这样|确认|通过)",
             r"(很满意|满意|挺好|很好|可以|行|好的|ok|okay|yes)",
+            r"(推荐.*方案|开始规划|出方案|帮我规划|帮我安排|生成方案|看看方案|给我看看)",
         ]
         return any(_re.search(pattern, compact) for pattern in patterns)
 
@@ -591,8 +714,11 @@ class LLMConversationEngine:
     def _build_goal_from_slots(self, slots: dict[str, Any], messages) -> dict[str, Any] | None:
         try:
             group_size = int(slots.get("group_size", ""))
-            duration_hours = int(slots.get("duration_hours", ""))
         except (TypeError, ValueError):
+            return None
+
+        duration_hours = self._coerce_duration_hours(slots.get("duration_hours", ""))
+        if duration_hours is None:
             return None
 
         raw_text = self._build_raw_text_from_slots(slots, messages)
@@ -646,6 +772,38 @@ class LLMConversationEngine:
                 "constraints": constraints,
             }
         )
+
+    def _coerce_duration_hours(self, value: Any) -> int | None:
+        """把“1-2个小时”“2~3小时”“半天”这类时长表达收敛成规划器可用的整数小时。"""
+        if value is None:
+            return None
+
+        if isinstance(value, (int, float)):
+            return min(max(int(value), 1), 12)
+
+        text = str(value).strip()
+        if not text:
+            return None
+
+        compact = _re.sub(r"\s+", "", text)
+        if compact in {"半天"}:
+            return 4
+        if compact in {"一整天", "全天"}:
+            return 8
+        if compact.isdigit():
+            return min(max(int(compact), 1), 12)
+
+        range_match = _re.search(r"(\d+)\s*[-~到至]\s*(\d+)", compact)
+        if range_match:
+            start = int(range_match.group(1))
+            end = int(range_match.group(2))
+            return min(max(max(start, end), 1), 12)
+
+        hour_match = _re.search(r"(\d+)\s*个?小时", compact)
+        if hour_match:
+            return min(max(int(hour_match.group(1)), 1), 12)
+
+        return None
 
     def _build_raw_text_from_slots(self, slots: dict[str, Any], messages) -> str:
         if slots.get("goal"):

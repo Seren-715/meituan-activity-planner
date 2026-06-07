@@ -1,6 +1,6 @@
 // ===== 结果列组件 =====
 
-import type { ExecutionResult, Goal, PlanningResult, PlanOption } from '../types'
+import type { ExecutionResult, PlanningResult, PlanOption } from '../types'
 import { sceneLabel, travelLabel, formatScore } from '../utils/helpers'
 import { MetaBlock } from './MetaBlock'
 import { PlanCompareCard } from './PlanCompareCard'

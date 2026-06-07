@@ -126,7 +126,7 @@ class TestGoalParser(unittest.TestCase):
         self.assertEqual(g.duration_hours, 4)
         self.assertEqual(g.time_window, "下午")
         self.assertEqual(g.distance_preference, "近场")
-        self.assertEqual(g.city, "")  # GoalParser gets city from context only
+        self.assertEqual(g.city, "福州")  # GoalParser now extracts city from text
         self.assertEqual(g.child_age_hint, "5岁")
         self.assertEqual(g.pace_preference, "轻松")
 

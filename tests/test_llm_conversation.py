@@ -136,6 +136,56 @@ class TestLLMConversationDefaults(unittest.TestCase):
             ["我在福州", "杭州", "北京"],
         )
 
+    @patch.dict(
+        os.environ,
+        {
+            "DEEPSEEK_API_KEY": "deepseek-test-key",
+            "OPENAI_API_KEY": "",
+            "LLM_BASE_URL": "",
+            "LLM_MODEL": "",
+            "OPENAI_BASE_URL": "",
+        },
+        clear=False,
+    )
+    def test_confirmation_accepts_duration_range_and_enters_ready_state(self):
+        engine = LLMConversationEngine()
+        result = {
+            "assistant_reply": "好的！我来帮你确认一下你的需求：一个人、福州、上午、1-2小时，是这样吗？",
+            "slots": {
+                "goal": "一个人上午在福州逛逛",
+                "scene": "generic",
+                "group_size": "1",
+                "city": "福州",
+                "time_window": "上午",
+                "duration_hours": "1-2",
+                "distance_preference": "常规",
+                "travel_mode": "",
+                "child_age_hint": "",
+                "dining_preference": "",
+                "pace_preference": "轻松",
+                "special_needs": "",
+            },
+            "ready_to_plan": False,
+            "suggested_replies": ["可以，就这样"],
+            "plan_text": "",
+            "goal": None,
+        }
+        messages = [
+            {"role": "user", "content": "我想一个人在福州上午出去逛逛"},
+            {"role": "assistant", "content": "好的，那你大概想安排多久呢？"},
+            {"role": "user", "content": "1-2个小时"},
+            {"role": "assistant", "content": "好的！我来帮你确认一下你的需求：场景：一个人出去逛逛，人数：1人，城市：福州，时间：上午，时长：1-2小时。是这样没错吧？"},
+            {"role": "user", "content": "可以，就这样"},
+        ]
+
+        finalized = engine._finalize_confirmation_ready(messages, result)
+
+        self.assertTrue(finalized["ready_to_plan"])
+        self.assertIsNotNone(finalized["goal"])
+        self.assertEqual(finalized["goal"]["duration_hours"], 2)
+        self.assertEqual(finalized["plan_text"], finalized["goal"]["raw_text"])
+        self.assertEqual(finalized["assistant_reply"], "好，那我就按这版先帮你出方案。")
+
 
 if __name__ == "__main__":
     unittest.main()

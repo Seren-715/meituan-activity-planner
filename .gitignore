@@ -35,6 +35,12 @@ node_modules/
 *.swp
 *.swo
 *~
+*.code-workspace
+
+# AI / workspace metadata
+.trae/
+CLAUDE.md
+AGENTS.md
 
 # 操作系统
 .DS_Store

@@ -22,6 +22,8 @@ class GoalParser:
         pace_preference = self._detect_pace_preference(compact)
         share_target = self._detect_share_target(scene)
         city = str(context.get("city", "")).strip()
+        if not city:
+            city = self._detect_city(compact)
         origin_name = str(context.get("origin_name", "")).strip()
         origin_lat = self._to_float(context.get("origin_lat"))
         origin_lng = self._to_float(context.get("origin_lng"))
@@ -110,6 +112,10 @@ class GoalParser:
         return "generic"
 
     def _detect_group_size(self, text: str, scene: SceneType) -> int:
+        # 一个人/自己出去/独自
+        if re.search(r"(自己|一个人|独自|一个人去)", text):
+            return 1
+
         match = re.search(r"([0-9一二两三四五六七八九十]+)\s*个?人", text)
         if match:
             return self._parse_number_token(match.group(1))
@@ -144,16 +150,23 @@ class GoalParser:
             lower = int(range_match.group(1))
             upper = int(range_match.group(2))
             return (lower + upper) // 2
+        # 匹配"两个半小时"、"2个半小时"等带"半"的情况
+        half_match = re.search(r"([一二两三四五六七八九十\d]+)\s*个?半小时", text)
+        if half_match:
+            mapping = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5}
+            token = half_match.group(1)
+            base = int(token) if token.isdigit() else mapping.get(token, 2)
+            return min(max(base, 2), 6)  # 半小时向下取整
         match = re.search(r"(\d+)\s*个?小时", text)
         if match:
             hours = int(match.group(1))
-            return min(max(hours, 4), 6)
+            return min(max(hours, 2), 6)
         if "几个小时" in text or "半天" in text:
             return 5
         return 5
 
     def _detect_time_window(self, text: str) -> str:
-        if "上午" in text:
+        if "上午" in text or "早上" in text or "早晨" in text:
             return "上午"
         if "晚上" in text or "夜" in text:
             return "晚上"
@@ -234,3 +247,26 @@ class GoalParser:
             return float(value)
         except (TypeError, ValueError):
             return None
+
+    # 常见城市列表，用于从文本中提取城市
+    _KNOWN_CITIES = [
+        "北京", "上海", "广州", "深圳", "杭州", "成都", "武汉", "南京", "重庆", "天津",
+        "苏州", "西安", "长沙", "郑州", "青岛", "大连", "厦门", "福州", "昆明", "合肥",
+        "济南", "哈尔滨", "沈阳", "长春", "太原", "石家庄", "呼和浩特", "兰州", "银川",
+        "西宁", "乌鲁木齐", "拉萨", "南宁", "贵阳", "海口", "三亚", "珠海", "东莞",
+        "佛山", "无锡", "宁波", "温州", "泉州", "烟台", "潍坊", "常州", "徐州", "嘉兴",
+    ]
+
+    def _detect_city(self, text: str) -> str:
+        """从文本中提取城市名。优先匹配"在XX"模式，再匹配已知城市名。"""
+        # "在福州大学附近" → 提取"福州"（"在"后面的城市名，2-3字）
+        match = re.search(r"在([一-龥]{2,3}?)(?:大学|市|省|区|县|附近|旁边|出发|商圈|地铁)", text)
+        if match:
+            candidate = match.group(1)
+            if candidate in self._KNOWN_CITIES:
+                return candidate
+        # 直接匹配已知城市名
+        for city in self._KNOWN_CITIES:
+            if city in text:
+                return city
+        return ""
