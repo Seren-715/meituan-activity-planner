@@ -113,10 +113,25 @@ class GoalParser:
         match = re.search(r"([0-9一二两三四五六七八九十]+)\s*个?人", text)
         if match:
             return self._parse_number_token(match.group(1))
-        if "一家四口" in text:
-            return 4
+
+        # 模式匹配：一家X口  (一家三口/一家四口/一家五口...)
+        family_n = re.search(r"一家([0-9一二两三四五六七八九十]+)口", text)
+        if family_n:
+            return self._parse_number_token(family_n.group(1))
+
+        # 模式匹配：X口之家
+        n_family = re.search(r"([0-9一二两三四五六七八九十]+)口之家", text)
+        if n_family:
+            return self._parse_number_token(n_family.group(1))
+
+        # 夫妻/两口子 = 2
+        if re.search(r"(夫妻俩|两口子|两夫妻)", text):
+            return 2
+
+        # 两大一小 = 3
         if "两大一小" in text:
             return 3
+
         if scene == "family":
             return 3
         if scene == "friends":

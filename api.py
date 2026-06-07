@@ -1,3 +1,4 @@
+from __future__ import annotations
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,6 +9,7 @@ import os
 
 from meituan_demo.agent import LocalActivityAgent
 from meituan_demo.llm_conversation import LLMConversationEngine
+from meituan_demo.session import SessionManager
 from meituan_demo.models import (
     ActionType,
     CandidateType,
@@ -33,9 +35,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 规划与对话分开编排，便于前端先澄清需求，再进入正式规划。
-agent = LocalActivityAgent()
-conversation = LLMConversationEngine()
+# 会话管理器：每个用户独立的 agent 和对话引擎。
+session_manager = SessionManager()
+
+# 保留全局实例作为无 session_id 时的兼容降级。
+_global_agent = LocalActivityAgent()
+_global_conversation = LLMConversationEngine()
 
 
 class ChatMessageIn(BaseModel):
@@ -45,14 +50,17 @@ class ChatMessageIn(BaseModel):
 
 class ChatRequest(BaseModel):
     messages: list[ChatMessageIn] = Field(default_factory=list)
+    session_id: str | None = None
 
 
 class ChatResponse(BaseModel):
+    # 对话接口的稳定契约：前端始终按这组字段消费，不再区分普通/流式的不同结构。
     assistant_reply: str
     slots: dict[str, str] = Field(default_factory=dict)
     ready_to_plan: bool = False
     suggested_replies: list[str] = Field(default_factory=list)
     plan_text: str = ""
+    goal: GoalIn | None = None
 
 
 class PlanRequest(BaseModel):
@@ -62,6 +70,7 @@ class PlanRequest(BaseModel):
     origin_lat: float | None = None
     origin_lng: float | None = None
     travel_mode: TravelMode = "driving"
+    session_id: str | None = None
 
 
 class ConstraintIn(BaseModel):
@@ -82,11 +91,13 @@ class GoalIn(BaseModel):
     origin_lng: float | None = None
     travel_mode: TravelMode = "driving"
     child_age_hint: str = ""
+    share_target: str = "同行人"
     pace_preference: str = "常规"
     preferences: list[str] = Field(default_factory=list)
     dining_preferences: list[str] = Field(default_factory=list)
     special_needs: list[str] = Field(default_factory=list)
     constraints: list[ConstraintIn] = Field(default_factory=list)
+    session_id: str | None = None
 
     model_config = ConfigDict(extra="ignore")
 
@@ -142,6 +153,8 @@ class PlanningOutputIn(BaseModel):
     actions: list[ExecutionActionIn] = Field(default_factory=list)
     data_mode: str = "mock"
     alternatives: list[ItineraryIn] = Field(default_factory=list)
+    alternative_actions: list[list[ExecutionActionIn]] = Field(default_factory=list)
+    session_id: str | None = None
 
     model_config = ConfigDict(extra="ignore")
 
@@ -164,6 +177,7 @@ class PlanningOutputOut(BaseModel):
     actions: list[ExecutionActionIn] = Field(default_factory=list)
     data_mode: str = "mock"
     alternatives: list[ItineraryIn] = Field(default_factory=list)
+    alternative_actions: list[list[ExecutionActionIn]] = Field(default_factory=list)
     recommendation_reason: str = ""
 
     model_config = ConfigDict(extra="ignore")
@@ -178,13 +192,21 @@ class AgentOutputOut(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
 
+@app.post("/session")
+def create_session():
+    """创建新会话，返回 session_id。"""
+    session = session_manager.create()
+    return {"session_id": session.session_id}
+
+
 @app.post("/chat", response_model=ChatResponse)
 def chat_activity(req: ChatRequest):
     # /chat 只负责多轮澄清与槽位整理，不直接执行正式规划。
+    session = session_manager.get_or_create(req.session_id)
     try:
-        return conversation.reply([item.model_dump() for item in req.messages])
+        return session.conversation.reply([item.model_dump() for item in req.messages])
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=503, detail="对话服务暂时不可用，请检查服务器配置或网络连接。")
 
 
 
@@ -193,22 +215,27 @@ def chat_activity(req: ChatRequest):
 
 @app.post("/chat/stream")
 async def chat_stream(req: ChatRequest):
-    """SSE streaming chat endpoint."""
+    """SSE 流式对话接口，事件类型固定为 token / done / error。"""
     import json as _json
+    session = session_manager.get_or_create(req.session_id)
     def gen():
         try:
-            for ev in conversation.reply_stream([item.model_dump() for item in req.messages]):
+            for ev in session.conversation.reply_stream([item.model_dump() for item in req.messages]):
                 yield "data: " + _json.dumps(ev, ensure_ascii=False) + chr(10) + chr(10)
-        except Exception:
-            yield "data: " + _json.dumps({"type": "error", "text": "chat error"}, ensure_ascii=False) + chr(10) + chr(10)
+        except Exception as exc:
+            yield "data: " + _json.dumps(
+                {"type": "error", "text": "服务器或网络异常，请稍后重试。", "detail": str(exc)},
+                ensure_ascii=False,
+            ) + chr(10) + chr(10)
         yield "data: [DONE]" + chr(10) + chr(10)
     return StreamingResponse(gen(), media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
 @app.post("/plan", response_model=PlanningOutputOut)
 def plan_activity(req: PlanRequest):
     # 当前端确认信息足够后，再把整理后的自然语言交给规划器生成方案。
+    session = session_manager.get_or_create(req.session_id)
     try:
-        planning = agent.plan(
+        planning = session.agent.plan(
             req.user_text,
             {
                 "city": req.city,
@@ -225,6 +252,7 @@ def plan_activity(req: PlanRequest):
 @app.post("/execute", response_model=AgentOutputOut)
 def execute_activity(planning_data: PlanningOutputIn):
     # 执行接口接收前端确认过的方案，并转换回内部 dataclass 结构。
+    session = session_manager.get_or_create(planning_data.session_id)
     try:
         goal_data = planning_data.goal.model_dump()
         goal_data["constraints"] = [
@@ -261,7 +289,7 @@ def execute_activity(planning_data: PlanningOutputIn):
             alternatives=alternatives
         )
 
-        output = agent.execute(planning_output)
+        output = session.agent.execute(planning_output)
         return _serialize_execution(output)
     except Exception as e:
         import traceback
@@ -276,6 +304,7 @@ def _serialize_planning(planning: PlanningOutput) -> dict[str, Any]:
         "itinerary": _serialize_itinerary(planning.itinerary),
         "actions": [asdict(action) for action in planning.actions],
         "alternatives": [_serialize_itinerary(item) for item in planning.alternatives],
+        "alternative_actions": [[asdict(action) for action in item] for item in planning.alternative_actions],
         "data_mode": planning.data_mode,
         "recommendation_reason": planning.recommendation_reason,
     }
@@ -307,6 +336,26 @@ def _serialize_execution(output: AgentOutput) -> dict[str, Any]:
         "share_text": output.share_text,
         "summary": output.summary,
     }
+
+
+
+@app.post("/plan/direct", response_model=PlanningOutputOut)
+def plan_direct(goal_data: GoalIn):
+    """接收对话阶段产出的结构化 Goal，直通 Planner，跳过 GoalParser 文本往返。"""
+    session = session_manager.get_or_create(goal_data.session_id)
+    try:
+        goal_dict = goal_data.model_dump()
+        goal_dict.pop("session_id", None)
+        goal_dict["constraints"] = [
+            Constraint(**c.model_dump()) for c in goal_data.constraints
+        ]
+        goal = Goal(**goal_dict)
+        planning = session.agent.planner.build_plan(goal)
+        return _serialize_planning(planning)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # Frontend SPA serving

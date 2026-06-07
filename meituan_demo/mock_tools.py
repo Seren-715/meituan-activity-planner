@@ -7,6 +7,7 @@ import os
 from urllib.parse import urlencode
 from urllib.request import urlopen
 
+from .mock_seed_data import MOCK_CANDIDATE_DATA
 from .models import Candidate, ExecutionAction, ExecutionResult, Goal
 
 
@@ -20,216 +21,16 @@ class MockToolbox:
         self._route_cache: dict[tuple[str, str, str], tuple[int, int]] = {}
 
     def search_activities(self, goal: Goal) -> list[Candidate]:
-        real_candidates = self._search_real_candidates(goal, category="activity")
-        if real_candidates:
-            self.last_data_mode = "real"
-            return self._apply_scenario(real_candidates)
-        items = [
-            Candidate(
-                name="室内亲子乐园",
-                category="activity",
-                tags=["亲子", "室内", "低折腾"],
-                duration_minutes=120,
-                area="社区商圈",
-                price_level="medium",
-                family_friendly=True,
-                availability="available",
-                address="社区商圈 1 号",
-                business_area="社区商圈",
-                score=8.9,
-                reason="适合亲子场景，路程短，天气影响小。",
-            ),
-            Candidate(
-                name="社区手作体验馆",
-                category="activity",
-                tags=["亲子", "手作", "雨天可行"],
-                duration_minutes=100,
-                area="社区商圈",
-                price_level="low",
-                family_friendly=True,
-                availability="available",
-                address="社区商圈 18 号",
-                business_area="社区商圈",
-                score=8.1,
-                reason="适合带孩子动手参与，节奏更平缓。",
-            ),
-            Candidate(
-                name="沉浸式剧本体验馆",
-                category="activity",
-                tags=["社交", "互动", "朋友局"],
-                duration_minutes=150,
-                area="核心商圈",
-                price_level="medium",
-                family_friendly=False,
-                availability="available",
-                address="核心商圈 88 号",
-                business_area="核心商圈",
-                score=8.5,
-                reason="适合朋友聚会，互动感强。",
-            ),
-            Candidate(
-                name="保龄球社交馆",
-                category="activity",
-                tags=["社交", "轻竞技", "朋友局"],
-                duration_minutes=110,
-                area="次核心商圈",
-                price_level="medium",
-                family_friendly=False,
-                availability="available",
-                address="次核心商圈 33 号",
-                business_area="次核心商圈",
-                score=8.3,
-                reason="上手门槛低，适合多人轻社交。",
-            ),
-            Candidate(
-                name="城市公园轻徒步",
-                category="activity",
-                tags=["户外", "轻松", "低成本"],
-                duration_minutes=90,
-                area="近场公园",
-                price_level="low",
-                family_friendly=True,
-                availability="available",
-                address="近场公园东门",
-                business_area="近场公园",
-                score=8.2,
-                reason="距离近，节奏舒缓，适合短时放松。",
-            ),
-        ]
-        self.last_data_mode = "mock"
-        return self._apply_scenario(items)
+        # 活动候选统一走一套加载逻辑，避免真实/Mock 双路径重复展开。
+        return self._load_candidates(goal, category="activity")
 
     def search_restaurants(self, goal: Goal) -> list[Candidate]:
-        real_candidates = self._search_real_candidates(goal, category="restaurant")
-        if real_candidates:
-            self.last_data_mode = "real"
-            return self._apply_scenario(real_candidates)
-        items = [
-            Candidate(
-                name="家常菜亲子餐厅",
-                category="restaurant",
-                tags=["亲子座椅", "家常菜", "清淡可选"],
-                duration_minutes=90,
-                area="社区商圈",
-                price_level="medium",
-                family_friendly=True,
-                availability="queue_15m",
-                address="社区商圈 5 号",
-                business_area="社区商圈",
-                score=8.8,
-                reason="适合家庭聚餐，排队时间可接受。",
-            ),
-            Candidate(
-                name="热闹烤肉店",
-                category="restaurant",
-                tags=["朋友聚餐", "气氛好"],
-                duration_minutes=100,
-                area="核心商圈",
-                price_level="medium",
-                family_friendly=False,
-                availability="available",
-                address="核心商圈 29 号",
-                business_area="核心商圈",
-                score=8.7,
-                reason="适合多人朋友场景，执行成功率高。",
-            ),
-            Candidate(
-                name="轻食简餐吧",
-                category="restaurant",
-                tags=["轻食", "快捷", "少负担"],
-                duration_minutes=70,
-                area="近场公园",
-                price_level="low",
-                family_friendly=True,
-                availability="available",
-                address="近场公园南侧",
-                business_area="近场公园",
-                score=8.0,
-                reason="适合清淡偏好，衔接顺畅。",
-            ),
-            Candidate(
-                name="港式茶餐厅",
-                category="restaurant",
-                tags=["出餐稳定", "朋友聚餐", "儿童友好"],
-                duration_minutes=80,
-                area="社区商圈",
-                price_level="medium",
-                family_friendly=True,
-                availability="available",
-                address="社区商圈 12 号",
-                business_area="社区商圈",
-                score=8.4,
-                reason="上菜稳定、口味覆盖广，适合作为稳妥餐饮备选。",
-            ),
-            Candidate(
-                name="川味小馆",
-                category="restaurant",
-                tags=["重口味", "朋友聚餐", "下饭"],
-                duration_minutes=85,
-                area="次核心商圈",
-                price_level="low",
-                family_friendly=False,
-                availability="available",
-                address="次核心商圈 16 号",
-                business_area="次核心商圈",
-                score=7.9,
-                reason="适合偏重口味的朋友聚餐，但不适合清淡需求。",
-            ),
-        ]
-        self.last_data_mode = "mock"
-        return self._apply_scenario(items)
+        # 餐饮候选改成统一数据源构建，后续补城市或标签时只改一处。
+        return self._load_candidates(goal, category="restaurant")
 
     def search_addons(self, goal: Goal) -> list[Candidate]:
-        real_candidates = self._search_real_candidates(goal, category="addon")
-        if real_candidates:
-            self.last_data_mode = "real"
-            return self._apply_scenario(real_candidates)
-        items = [
-            Candidate(
-                name="甜品补给站",
-                category="addon",
-                tags=["收尾", "轻社交"],
-                duration_minutes=45,
-                area="同商圈",
-                price_level="low",
-                family_friendly=True,
-                availability="available",
-                address="同商圈 A1",
-                business_area="同商圈",
-                score=7.8,
-                reason="作为收尾补充，保持 4-6 小时完整闭环。",
-            ),
-            Candidate(
-                name="河边散步收尾",
-                category="addon",
-                tags=["轻松", "散步", "低成本"],
-                duration_minutes=40,
-                area="近场公园",
-                price_level="low",
-                family_friendly=True,
-                availability="available",
-                address="近场公园沿河步道",
-                business_area="近场公园",
-                score=7.7,
-                reason="餐后轻松散步，适合少折腾场景。",
-            ),
-            Candidate(
-                name="桌游放松局",
-                category="addon",
-                tags=["社交", "聊天", "雨天可行"],
-                duration_minutes=60,
-                area="核心商圈",
-                price_level="medium",
-                family_friendly=False,
-                availability="available",
-                address="核心商圈 61 号",
-                business_area="核心商圈",
-                score=7.9,
-                reason="适合朋友场景的低门槛续摊。",
-            ),
-        ]
-        self.last_data_mode = "mock"
-        return self._apply_scenario(items)
+        # 补充活动与主活动/餐饮共用相同装配方式，保持 fallback 行为一致。
+        return self._load_candidates(goal, category="addon")
 
     def search_candidates(self, goal: Goal) -> dict[str, list[Candidate]]:
         return {
@@ -358,6 +159,20 @@ class MockToolbox:
 
     def data_mode(self) -> str:
         return self.last_data_mode
+
+    def _load_candidates(self, goal: Goal, category: str) -> list[Candidate]:
+        """统一加载候选：优先真实数据，失败后退回本地 Mock 种子。"""
+        real_candidates = self._search_real_candidates(goal, category=category)
+        if real_candidates:
+            self.last_data_mode = "real"
+            return self._apply_scenario(real_candidates)
+        self.last_data_mode = "mock"
+        return self._apply_scenario(self._build_mock_candidates(category))
+
+    def _build_mock_candidates(self, category: str) -> list[Candidate]:
+        """把简化的字典种子转换为 Candidate，减少重复构造代码。"""
+        items = MOCK_CANDIDATE_DATA.get(category, [])
+        return [Candidate(category=category, **item) for item in items]
 
     def _search_real_candidates(self, goal: Goal, category: str) -> list[Candidate]:
         if not self.amap_service_key:

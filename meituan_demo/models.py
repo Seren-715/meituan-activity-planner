@@ -129,6 +129,7 @@ class PlanningOutput:
     actions: list[ExecutionAction]
     data_mode: str = "mock"
     alternatives: list[Itinerary] = field(default_factory=list)
+    alternative_actions: list[list[ExecutionAction]] = field(default_factory=list)
     recommendation_reason: str = ""
 
 

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from itertools import product
+import re
 
 from .mock_tools import MockToolbox
 from .models import Candidate, ExecutionAction, Goal, Itinerary, ItineraryStop, PlanningOutput, ScoreBreakdownItem
+from .scoring_config import CANDIDATE_WEIGHTS, ITINERARY_WEIGHTS, ITINERARY_LIMITS, FALLBACK_WEIGHTS
 
 
 class Planner:
@@ -25,11 +27,13 @@ class Planner:
         primary.recommendation_reason = recommendation_reason
 
         actions = self._build_actions(goal, primary)
+        alternative_actions = [self._build_actions(goal, item) for item in alternatives]
         return PlanningOutput(
             goal=goal,
             itinerary=primary,
             actions=actions,
             alternatives=alternatives,
+            alternative_actions=alternative_actions,
             data_mode=self.toolbox.data_mode(),
             recommendation_reason=recommendation_reason,
         )
@@ -98,7 +102,7 @@ class Planner:
         if addon is not None:
             total_minutes += addon.duration_minutes
 
-        if total_minutes < 210 or total_minutes > 390:
+        if total_minutes < ITINERARY_LIMITS.min_total_minutes or total_minutes > ITINERARY_LIMITS.max_total_minutes:
             return None
 
         alerts = self._collect_alerts(activity_message, restaurant_message, addon_message)
@@ -172,7 +176,7 @@ class Planner:
             total_minutes=total_minutes,
             stops=stops,
             rationale=["当前可用资源较少，先给出活动加餐饮的基础闭环方案。"],
-            score=72.0,
+            score=FALLBACK_WEIGHTS.total_score,
             total_travel_minutes=start_leg + second_leg + 20,
             route_summary=[
                 self._route_text(goal.origin_name or "出发点", activity, start_leg, start_distance),
@@ -182,11 +186,11 @@ class Planner:
             map_center_lng=self._center_lng([activity, restaurant]),
             alerts=["补充活动候选不足，建议执行前再确认是否追加收尾安排。"],
             score_breakdown=[
-                ScoreBreakdownItem(label="路线效率", score=16.0, detail="当前为基础闭环方案，优先保证路程和时长可落地。"),
-                ScoreBreakdownItem(label="人群适配", score=17.0, detail="主活动和餐饮仍围绕当前人群需求筛选。"),
-                ScoreBreakdownItem(label="体验丰富", score=13.0, detail="因补充活动缺失，丰富度略低于完整方案。"),
-                ScoreBreakdownItem(label="性价比", score=14.0, detail="保留活动+餐饮核心链路，避免因资源不足完全失效。"),
-                ScoreBreakdownItem(label="执行稳定性", score=12.0, detail="优先保留当前可确认的关键资源。"),
+                ScoreBreakdownItem(label="路线效率", score=FALLBACK_WEIGHTS.route_efficiency, detail="当前为基础闭环方案，优先保证路程和时长可落地。"),
+                ScoreBreakdownItem(label="人群适配", score=FALLBACK_WEIGHTS.scene_fit, detail="主活动和餐饮仍围绕当前人群需求筛选。"),
+                ScoreBreakdownItem(label="体验丰富", score=FALLBACK_WEIGHTS.experience, detail="因补充活动缺失，丰富度略低于完整方案。"),
+                ScoreBreakdownItem(label="性价比", score=FALLBACK_WEIGHTS.cost_effectiveness, detail="保留活动+餐饮核心链路，避免因资源不足完全失效。"),
+                ScoreBreakdownItem(label="执行稳定性", score=FALLBACK_WEIGHTS.execution_stability, detail="优先保留当前可确认的关键资源。"),
             ],
             recommendation_reason="当前资源不足时，这条基础闭环更稳，适合先锁定主活动和餐饮。",
             planning_basis=self._planning_basis(goal, activity, restaurant, None),
@@ -318,28 +322,48 @@ class Planner:
             return False
         if "清淡饮食" in goal.dining_preferences and candidate.category == "restaurant" and "重口味" in tags:
             return False
+        if "室内优先" in goal.special_needs and candidate.category == "activity" and not ({"室内", "雨天可行"} & tags):
+            return False
+        if goal.travel_mode == "walking" and candidate.travel_minutes and candidate.travel_minutes > 25:
+            return False
+        if goal.scene == "family" and self._child_age_num(goal) is not None and self._child_age_num(goal) <= 6:
+            if candidate.category == "restaurant" and ("重口味" in tags or any(token in candidate.name for token in ["火锅", "烤肉", "烧烤"])):
+                return False
         if goal.pace_preference == "轻松" and candidate.category == "activity" and "互动" in tags and candidate.area == "核心商圈":
             return False
         return True
 
     def _candidate_score(self, candidate: Candidate, goal: Goal) -> float:
-        score = candidate.score * 8
+        w = CANDIDATE_WEIGHTS
+        score = candidate.score * w.base_quality_multiplier
         tags = set(candidate.tags)
 
         if goal.scene == "family" and candidate.family_friendly:
-            score += 10
+            score += w.scene_match_bonus
         if goal.scene == "friends" and ("社交" in tags or "朋友局" in tags or "聊天" in tags):
-            score += 10
+            score += w.scene_match_bonus
         if goal.distance_preference == "近场" and candidate.area in self.NEARBY_AREAS:
-            score += 8
+            score += w.distance_nearby_bonus
         if candidate.travel_minutes:
-            score += max(0.0, 10.0 - candidate.travel_minutes / 3)
+            score += max(0.0, w.travel_decay_max - candidate.travel_minutes / w.travel_decay_divisor)
+        if goal.travel_mode == "walking":
+            if candidate.area in self.NEARBY_AREAS:
+                score += w.walking_nearby_bonus
+            if candidate.travel_minutes and candidate.travel_minutes > w.walking_far_threshold:
+                score -= w.walking_far_penalty
         if goal.pace_preference == "轻松" and {"低折腾", "轻松", "散步", "快捷"} & tags:
-            score += 6
+            score += w.pace_bonus
         if "清淡饮食" in goal.dining_preferences and {"清淡可选", "轻食"} & tags:
-            score += 6
+            score += w.diet_bonus
+        if "室内优先" in goal.special_needs and {"室内", "雨天可行"} & tags:
+            score += w.indoor_bonus
+        if "停车方便" in goal.special_needs and candidate.area in self.NEARBY_AREAS:
+            score += w.parking_bonus
+        if goal.scene == "family" and self._child_age_num(goal) is not None and self._child_age_num(goal) <= w.young_child_age_threshold:
+            if candidate.category == "activity" and {"室内", "亲子"} & tags:
+                score += w.young_child_bonus
         if "需要餐饮安排" in goal.preferences and candidate.category == "restaurant":
-            score += 4
+            score += w.dining_demand_bonus
 
         _, availability_message = self.toolbox.check_availability(candidate)
         if "等待" in availability_message:
@@ -355,15 +379,16 @@ class Planner:
         total_minutes: int,
         alerts: list[str],
     ) -> list[ScoreBreakdownItem]:
+        w = ITINERARY_WEIGHTS
         target_minutes = goal.duration_hours * 60
-        average_quality = (activity.score + restaurant.score + (addon.score if addon else 7.2)) / 3
-        route_efficiency = max(8.0, 25 - abs(total_minutes - target_minutes) / 8)
-        scene_fit = min(25.0, 10.0 + self._scene_bundle_score(goal, activity, restaurant, addon) * 1.5)
-        experience = min(20.0, average_quality * 1.8 + (4.0 if addon is not None else 0.0))
-        cost_effectiveness = min(15.0, 7.0 + average_quality * 0.9)
+        average_quality = (activity.score + restaurant.score + (addon.score if addon else w.experience_default_addon_score)) / 3
+        route_efficiency = max(w.route_efficiency_min, w.route_efficiency_max - abs(total_minutes - target_minutes) / w.route_efficiency_decay)
+        scene_fit = min(w.scene_fit_max, w.scene_fit_base + self._scene_bundle_score(goal, activity, restaurant, addon) * w.scene_fit_multiplier)
+        experience = min(w.experience_max, average_quality * w.experience_quality_multiplier + (w.experience_addon_bonus if addon is not None else 0.0))
+        cost_effectiveness = min(w.cost_max, w.cost_base + average_quality * w.cost_multiplier)
         execution_stability = min(
-            15.0,
-            6.0 + self._distance_bundle_score(goal, activity, restaurant, addon) + self._pace_bundle_score(goal, activity, restaurant, addon) - len(alerts) * 1.5,
+            w.stability_max,
+            w.stability_base + self._distance_bundle_score(goal, activity, restaurant, addon) + self._pace_bundle_score(goal, activity, restaurant, addon) - len(alerts) * w.alert_penalty,
         )
         return [
             ScoreBreakdownItem(
@@ -388,7 +413,7 @@ class Planner:
             ),
             ScoreBreakdownItem(
                 label="执行稳定性",
-                score=round(max(6.0, execution_stability), 1),
+                score=round(max(w.stability_min, execution_stability), 1),
                 detail="会参考距离、排队提醒和资源可用性，优先保留更稳妥的方案。",
             ),
         ]
@@ -429,6 +454,14 @@ class Planner:
             if {"社交", "朋友局", "聊天"} & tags:
                 score += 4.0
         return score
+
+    def _child_age_num(self, goal: Goal) -> int | None:
+        if not goal.child_age_hint:
+            return None
+        match = re.search(r"\d+", goal.child_age_hint)
+        if not match:
+            return None
+        return int(match.group())
 
     def _pace_bundle_score(
         self,

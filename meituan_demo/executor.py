@@ -13,6 +13,8 @@ class Executor:
         for action in actions:
             result = self.toolbox.execute(action)
             result.details.setdefault("stage", self._stage_name(action.action_type))
+            result.details.setdefault("stage_type", "primary")
+            result.details.setdefault("action_target", action.target)
             results.append(result)
             if result.status == "failed":
                 results.extend(self._recover(action, result))
@@ -49,8 +51,12 @@ class Executor:
         for compensation in compensations:
             retry = self.toolbox.execute(compensation)
             retry.details.setdefault("stage", f"补偿{self._stage_name(compensation.action_type)}")
+            retry.details.setdefault("stage_type", "compensation")
+            retry.details.setdefault("fallback_from", action.action_type)
             if retry.status == "success":
                 retry.message = f"{result.message}；已触发补偿动作，{retry.message}"
+            if not retry.recovery_hint:
+                retry.recovery_hint = "这是系统自动选择的补偿动作，用来保证行程还能继续推进。"
             recovered.append(retry)
         return recovered
 

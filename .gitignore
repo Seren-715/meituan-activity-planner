@@ -1,37 +1,45 @@
 # Python
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
-.venv/
-venv/
 *.egg-info/
 dist/
 build/
+*.egg
 
-# Node / Frontend
-frontend/node_modules/
-frontend/dist/
+# 虚拟环境
+venv/
+.venv/
+env/
 
-# IDE
-.vscode/
-.idea/
-*.code-workspace
-
-# OS
-Thumbs.db
-.DS_Store
-Desktop.ini
-
-# Env
+# 环境变量（含API密钥）
 .env
 .env.local
 .env.*.local
 
-# Logs
+# 日志
 *.log
 _backend*.log
 
-# Temp
-*.tmp
-temp_*.py
-check_*.cjs
+# 调试文件
+debug.txt
+
+# 前端构建产物
+frontend/dist/
+frontend/node_modules/
+node_modules/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 操作系统
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 项目特定
+改进方案-*.md

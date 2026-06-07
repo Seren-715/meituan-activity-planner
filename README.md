@@ -5,7 +5,9 @@
 当前版本覆盖以下主流程：
 
 - 一句话目标输入
+- 多轮对话澄清需求（`/chat` + `/chat/stream`）
 - 家庭/朋友场景结构化理解
+- 对话阶段直接产出结构化 `Goal`
 - 显式展示已识别需求标签与规划阶段
 - 真实本地 POI 检索或 Mock 降级
 - 4-6 小时主/备方案编排与统一评分对比
@@ -38,10 +40,37 @@
 
 ## 运行方式
 
+### 0. 一键启动
+
+在项目根目录执行：
+
+```powershell
+.\start-local.ps1
+```
+
+脚本会自动完成这些事情：
+
+- 构建前端静态资源
+- 启动后端：`http://127.0.0.1:8002/`
+- 启动前端预览：`http://127.0.0.1:4175/`
+- 固定前端只连接 `8002` 后端
+- 启动前检查 `LLM` 和高德相关环境变量，并提示缺失项
+
+推荐先配置这些变量再执行：
+
+```powershell
+$env:DEEPSEEK_API_KEY="你的 DeepSeek Key"
+$env:LLM_BASE_URL="https://api.deepseek.com/v1"
+$env:LLM_MODEL="deepseek-chat"
+$env:AMAP_WEB_SERVICE_KEY="你的高德 Web Service Key"
+$env:VITE_AMAP_JS_KEY="你的高德 JS Key"
+.\start-local.ps1
+```
+
 ### 1. 启动后端
 
 ```bash
-uvicorn api:app --reload --port 8000
+python -m uvicorn api:app --reload --host 127.0.0.1 --port 8002
 ```
 
 ### 2. 启动前端
@@ -49,13 +78,13 @@ uvicorn api:app --reload --port 8000
 ```bash
 cd frontend
 npm install
-npm run dev
+npm run preview
 ```
 
-前端默认请求 `http://127.0.0.1:8000`，如需修改可设置：
+前端默认请求 `http://127.0.0.1:8002`，如需修改可设置：
 
 ```bash
-VITE_API_BASE_URL=http://127.0.0.1:8000
+VITE_API_BASE_URL=http://127.0.0.1:8002
 ```
 
 ## 高德接入
@@ -66,7 +95,7 @@ VITE_API_BASE_URL=http://127.0.0.1:8000
 
 ```bash
 $env:AMAP_WEB_SERVICE_KEY="你的高德 Web Service Key"
-uvicorn api:app --reload --port 8000
+python -m uvicorn api:app --reload --host 127.0.0.1 --port 8002
 ```
 
 ### 前端地图展示
@@ -76,22 +105,41 @@ uvicorn api:app --reload --port 8000
 ```bash
 cd frontend
 $env:VITE_AMAP_JS_KEY="你的高德 JS Key"
-npm run dev
+npm run preview
 ```
+
+默认地址固定为：
+
+- 前端：`http://127.0.0.1:4175/`
+- 后端：`http://127.0.0.1:8002/`
 
 ## 双模式说明
 
 - 有 `AMAP_WEB_SERVICE_KEY`：
   - `/plan` 优先使用真实高德能力检索附近活动、餐饮和路线
+- 有 `OPENAI_API_KEY` / `DEEPSEEK_API_KEY`：
+  - `/chat`、`/chat/stream` 优先使用 LLM 生成自然回复，并回传结构化 `goal`
 - 无 `AMAP_WEB_SERVICE_KEY`：
   - 自动回退到现有 Mock 候选，保证比赛演示不会中断
+- 无 LLM Key、模型异常或网络失败：
+  - 不再回退到固定规则答复，前端直接提示服务器或网络异常
 - 无 `VITE_AMAP_JS_KEY`：
   - 页面仍可展示文本路线和地点卡片，只是不显示真实地图
+
+## 对话与规划主路径
+
+- 当前默认主路径：
+  - 前端通过 `/chat/stream` 做流式需求澄清
+  - 当 `ready_to_plan=true` 且返回结构化 `goal` 后，前端优先走 `/plan/direct`
+  - 仅当 `goal` 缺失或 `direct plan` 失败时，才回退到 `/plan` 文本规划
+- 这样做的目的：
+  - 减少“对话理解”和“规划消费”之间的信息损耗
+  - 保证比赛演示时家庭/朋友双场景都能更稳定地产生差异化方案
 
 ## 默认演示建议
 
 - 家庭场景：
-  - `今天下午想和老婆孩子出去玩几个小时，别离家太远，孩子5岁，顺便吃得清淡一点`
+  - `今天下午想和老婆孩子从公司附近出发玩几个小时，别太远，孩子5岁，顺便吃得清淡一点`
 - 朋友场景：
   - `今天下午想和4个朋友出去玩和吃饭，别太折腾，最好能聊天`
 
@@ -105,6 +153,8 @@ npm run dev
 - 当前版本是“比赛版进行中”：
   - 已有比赛级 Web 单页骨架
   - 已支持真实高德数据接入与 Mock 降级
+  - 已支持 `LLM 优先 + 规则兜底` 的对话澄清
+  - 已支持流式对话、改口、冲突提示、无效输入处理和复述确认
   - 已支持主/备方案、路线摘要、执行状态和分享文案
   - 已支持需求标签、阶段进度、评分依据、推荐理由和主备方案对比
 - 执行层仍以模拟执行为主，重点验证“从推荐到任务推进”的闭环

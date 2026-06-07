@@ -9,18 +9,29 @@
 - 演示链路完整稳定：无 Key 或接口异常时自动回退到 Mock，不中断整体展示
 
 ## 2. Planning 策略
-规划流程分四层：
+在比赛终版中，规划前增加了一层“对话澄清 -> 结构化 Goal”的编排：
 
-1. 目标理解
-- `GoalParser` 将一句话目标转为结构化 `Goal`
-- 识别场景、人数、时段、时长、距离偏好、儿童年龄、餐饮偏好、出发点、城市、出行方式
+1. 对话澄清
+- `api.py:/chat` 与 `api.py:/chat/stream` 负责多轮对话
+- `LLMConversationEngine` 优先生成自然回复、槽位和结构化 `goal`
+- 当 LLM 不可用、超时或结构异常时，直接返回服务异常，由前端提示服务器或网络问题
+- 对话阶段支持：
+  - 无效输入识别
+  - 小闲聊引回
+  - 改口确认
+  - 冲突提示
+  - 就绪复述确认
 
-2. 候选获取
+2. 目标理解
+- 对话完成后优先通过 `/plan/direct` 直接把结构化 `Goal` 交给 `Planner`
+- 旧的 `/plan` 文本路径保留为兼容兜底
+
+3. 候选获取
 - `MockToolbox` 优先走高德真实本地能力
 - 若存在 `AMAP_WEB_SERVICE_KEY`，则基于当前位置或城市检索活动、餐厅、补充活动
 - 若不存在 Key 或请求失败，则自动回退到本地 Mock 数据
 
-3. 方案评分
+4. 方案评分
 - `Planner` 对候选和 itinerary 两层打分
 - 评分考虑：
   - 路线效率
@@ -28,10 +39,15 @@
   - 体验丰富度
   - 性价比
   - 执行稳定性
+- 额外利用对话阶段补充的细粒度约束：
+  - `child_age_hint`
+  - `pace_preference`
+  - `travel_mode`
+  - `special_needs`
 - 输出主推荐方案和备选方案
 - 每条方案都保留评分拆解、推荐理由和规划依据，便于比赛展示和答辩说明
 
-4. 执行动作编排
+5. 执行动作编排
 - 主方案会被转换为结构化 `ExecutionAction`
 - 家庭场景默认更偏 `reserve + queue + delivery + share`
 - 朋友场景默认更偏 `reserve + queue + order + share`
@@ -54,7 +70,9 @@
   - `share()`
 
 - 编排关系
-  - `api.py:/plan` 接收目标与位置上下文
+  - `api.py:/chat` / `api.py:/chat/stream` 负责澄清需求并组织结构化 `Goal`
+  - `api.py:/plan/direct` 直接接收对话阶段产出的 `Goal`
+  - `api.py:/plan` 接收文本与位置上下文，作为兼容兜底路径
   - `LocalActivityAgent.plan()` 调 `GoalParser` 与 `Planner`
   - `Planner` 调查询类 Tool 获取候选、计算路线、生成主备方案与动作
   - `api.py:/execute` 接收确认后的规划结果
